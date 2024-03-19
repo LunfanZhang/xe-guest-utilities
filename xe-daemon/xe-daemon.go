@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+	"github.com/mdlayher/netlink"
 
 	guestmetric "github.com/xenserver/xe-guest-utilities/guestmetric"
 	syslog "github.com/xenserver/xe-guest-utilities/syslog"
@@ -24,6 +25,43 @@ const (
 	DivisorTwo           int    = 2
 	DivisorLeastMultiple int    = 2 // The least common multiple, ensure every collector done before executing InvalidCacheFlush.
 )
+
+func monitorNetlinkEvents(collector *guestmetric.Collector, logger *log.Logger, debugFlag *bool) {
+	ch := make(chan netlink.LinkUpdate)
+	exitCh := make(chan struct{})
+
+	go func() {
+		defer close(ch)
+		err := netlink.LinkSubscribe(ch, exitCh)
+		if err != nil {
+			logger.Printf("Netlink subscribe link failed: %s\n", err)
+			return
+		}
+	}()
+
+	for {
+		select {
+		case update := <-ch:
+			if *debugFlag {
+				logger.Printf("Netlink event received: %v\n", update)
+			}
+			logger.Printf("Netlink event received: %v\n", update) // todo delete later
+			switch update.Header.Type {
+			case syscall.RTM_NEWLINK:
+				handleNewLinkEvent(collector, update.Link.Attrs(), Logger)
+			case syscall.RTM_DELLINK:
+				handleDelLinkEvent(collector, update.Link.Attrs(), Logger)
+			case syscall.RTM_NEWADDR:
+				handleNewAddrEvent(collector, update.Link.Attrs(), Logger)
+			}
+
+		case <-exitCh:
+			logger.Printf("Netlink event monitor stopped\n")
+			return
+		}
+	}
+}
+
 
 func main() {
 	var err error
@@ -81,7 +119,6 @@ func main() {
 	}{
 		{DivisorOne, "CollectOS", collector.CollectOS},
 		{DivisorOne, "CollectMisc", collector.CollectMisc},
-		{DivisorOne, "CollectNetworkAddr", collector.CollectNetworkAddr},
 		{DivisorOne, "CollectDisk", collector.CollectDisk},
 		{DivisorTwo, "CollectMemory", collector.CollectMemory},
 	}
@@ -90,6 +127,8 @@ func main() {
 	if err != nil {
 		logger.Printf("xenstore.Read unique-domain-id error: %v\n", err)
 	}
+
+	go monitorNetlinkEvents(collector, logger, debugFlag)
 
 	for count := 0; ; count += 1 {
 		uniqueID, err := xs.Read("unique-domain-id")

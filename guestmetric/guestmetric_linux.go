@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"net"
 )
 
 type Collector struct {
@@ -210,6 +211,118 @@ func (c *Collector) CollectNetworkAddr() (GuestMetric, error) {
 		}
 	}
 	return current, nil
+}
+
+func printAllAttrs(attrs *netlink.LinkAttrs, logger *log.logger){
+	logger.Printf("The interface name is %s", attrs.Name)
+	logger.Printf("The interface index is %d", attrs.Index)
+	logger.Printf("The interface hardware address is %s", attrs.HardwareAddr)
+	logger.Printf("The interface flags is %d", attrs.Flags)
+	logger.Printf("The interface MTU is %d", attrs.MTU)
+	logger.Printf("The interface master index is %d", attrs.MasterIndex)
+	logger.Printf("The interface parent index is %d", attrs.ParentIndex)
+	logger.Printf("The interface alias is %s", attrs.Alias)
+	logger.Printf("The interface statistics is %v", attrs.Statistics)
+	for vf := range attrs.Vfs {
+		logger.Printf("The interface vf id is %d", vf.ID)
+		logger.Printf("The interface vf mac address is %s", vf.Mac)
+		logger.Printf("The interface vf vlan id is %d", vf.Vlan)
+		logger.Printf("The interface vf qos is %d", vf.Qos)
+		logger.Printf("The interface vf tx rate is %d", vf.TxRate)
+	}
+	logger.Printf("The interface promisc is %t", attrs.Promisc)
+	logger.Printf("The interface Protinfo is %v", attrs.Protinfo)
+	logger.Printf("The interface operstate is %s", attrs.OperState)
+}
+
+func handleNewLinkEvent(collector *guestmetric.Collector, attrs *netlink.LinkAttrs, logger *log.logger) {
+    printAllAttrs(attrs, logger)
+    paths, err := filepath.Glob(fmt.Sprintf("/sys/class/net/%s*", attrs.Name))
+    if err != nil {
+        logger.Printf("Failed to get the path of the network interface %s, error: %s", attrs.Name, err)
+        return
+    }
+    if len(paths) == 0 {
+        logger.Printf("No paths matched the pattern for the network interface %s", attrs.Name)
+        return
+    }
+    path := paths[0]
+    iface := filepath.Base(path)
+    logger.Printf("The vif id is %d", attrs.Vfs[0].ID)
+    prefix, vifId, err := collector.getTargetXenstorePath(iface)
+    if err != nil {
+        logger.Printf("Failed to get target xenstore path for interface %s, error: %s", iface, err)
+        return
+    }
+    if addrs, err := enumNetworkAddresses(iface); err == nil {
+        for tag, addr := range addrs {
+            err := collector.Client.Write(fmt.Sprintf("%s/%s/%s", prefix, vifId, tag), addr)
+            if err != nil {
+                logger.Printf("Failed to write the address %s to xenstore, error: %s", addr, err)
+            }
+        }
+    } else {
+        logger.Printf("Failed to enumerate network addresses for interface %s, error: %s", iface, err)
+    }
+}
+
+func handleDelLinkEvent(collector *guestmetric.Collector, attrs *netlink.LinkAttrs, logger *log.logger) {
+	printAllAttrs(attrs, logger)
+	vfID := attrs.Vfs[0].ID
+	logger.Printf("The vif id is %d", vfID)
+	paths := []string{
+		fmt.Sprintf("attr/vif/%s", vfID),
+		fmt.Sprintf("xenserver/attr/net-sriov-vf/%s", vfID),
+	}
+
+	for _, path := range paths {
+		if _, err := collector.Client.Read(path); err != nil {
+			logger.Printf("Failed to read the path %s from xenstore, error: %s", path, err)
+		}
+		if err := collector.Client.Rm(path); err != nil {
+			logger.Printf("Failed to remove the path %s from xenstore, error: %s", path, err)
+		}
+	}
+}
+
+
+func handleNewAddrEvent(collector *guestmetric.Collector, attrs *netlink.LinkAttrs, logger *log.logger) {
+	printAllAttrs(attrs, logger)
+	prefixPaths, err := filepath.Glob(fmt.Sprintf("/sys/class/net/%s*", attrs.Name))
+	if err != nil {
+		logger.Printf("Failed to get the path of the network interface %s, error: %s", attrs.Name, err)
+		return
+	}
+
+	prefix, vifID, err := getTargetXenstorePath(collector, prefixPaths)
+	if err != nil {
+		logger.Printf("Failed to get the target xenstore path, error: %s", err)
+		return
+	}
+
+	iface, err := net.InterfaceByName(attrs.Name)
+	if err != nil {
+		logger.Printf("Failed to get the interface by name %s, error: %s", attrs.Name, err)
+		return
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		logger.Printf("Failed to get the addresses of the interface %s, error: %s", attrs.Name, err)
+		return
+	}
+
+	for _, addr := range addrs {
+		ip := addr.IP
+		if ip.To4() != nil {
+			err = collector.Client.Write(fmt.Sprintf("%s/%s/%s", prefix, vifID, "ipv4"), ip.String())
+		} else if ip.To16() != nil {
+			err = collector.Client.Write(fmt.Sprintf("%s/%s/%s", prefix, vifID, "ipv6"), ip.String())
+		}
+		if err != nil {
+			logger.Printf("Failed to write the address %s to xenstore, error: %s", addr, err)
+		}
+	}
 }
 
 func readSysfs(filename string) (string, error) {
