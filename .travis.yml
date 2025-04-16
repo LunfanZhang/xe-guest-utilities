@@ -2,7 +2,7 @@ language: go
 sudo: false
 go:
   # Used for building XenServer Dundee
-  - 1.4.2
+  - 1.24
   # Forwards compatibility
   - tip
 script:
