@@ -77,6 +77,7 @@ $(DISTDIR)/$(PACKAGE)_$(VERSION)-$(RELEASE)_$(ARCH).tgz: $(OBJECTS)
 
 $(OBJECTDIR)/xe-daemon: $(XE_DAEMON_SOURCES:%=$(GOBUILDDIR)/%)
 	$(info ***** Build xe-daemon ******)
+	go version
 	mkdir -p $(OBJECTDIR)
 	$(GO_BUILD) $(GO_FLAGS) -o $@ $<
 
